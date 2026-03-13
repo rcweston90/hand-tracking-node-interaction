@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hand Tracking - Single Node</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #1a1a1a;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            text-align: center;
+            max-width: 1400px;
+            width: 100%;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        h1 {
+            color: #fff;
+            margin: 0;
+            flex: 1;
+            min-width: 300px;
+        }
+        .mode-indicator {
+            background: rgba(0, 255, 255, 0.1);
+            border: 2px solid #00ffff;
+            color: #00ffff;
+            padding: 12px 20px;
+            border-radius: 6px;
+            font-weight: 500;
+            min-width: 200px;
+        }
+        .reset-btn {
+            background: #ff4444;
+            color: #fff;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .reset-btn:hover {
+            background: #ff6666;
+        }
+        .reset-btn:active {
+            background: #dd0000;
+        }
+        .instructions {
+            display: none;
+            background: rgba(100, 200, 255, 0.1);
+            border-left: 4px solid #64c8ff;
+            padding: 16px;
+            margin: 20px 0;
+            border-radius: 4px;
+            color: #64c8ff;
+            text-align: left;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .instructions.visible {
+            display: block;
+        }
+        .instructions-title {
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .instructions-text {
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .video-container {
+            position: relative;
+            display: inline-block;
+            margin: 20px 0;
+        }
+        img {
+            max-width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            display: block;
+        }
+        canvas {
+            border-radius: 8px;
+        }
+        canvas:active {
+            cursor: grabbing;
+        }
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 40px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+        .stat-item {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 16px 20px;
+            border-radius: 6px;
+            min-width: 150px;
+        }
+        .stat-label {
+            color: #888;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+        .stat-value {
+            color: #00ffff;
+            font-size: 20px;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Hand Tracking - Single Node</h1>
+            <div class="mode-indicator" id="modeIndicator">Mode: Loading...</div>
+            <button class="reset-btn" onclick="resetNodes()">Reset Node</button>
+        </div>
+
+        <div class="instructions" id="instructions">
+            <div class="instructions-title" id="instructionsTitle">Placement Mode</div>
+            <div class="instructions-text" id="instructionsText">
+                Close your fist to place a node.<br>
+                Click and drag to move it around.<br>
+                Tap Reset to place a new node.
+            </div>
+        </div>
+
+        <div class="video-container" id="videoContainer">
+            <img src="{{ url_for('video_feed') }}" alt="Camera Stream" id="videoFeed">
+            <canvas id="nodeCanvas" style="position: absolute; top: 0; left: 0; cursor: grab;"></canvas>
+        </div>
+
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-label">Node Status</div>
+                <div class="stat-value" id="nodeCount">Not Placed</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Mode</div>
+                <div class="stat-value" id="modeStatus">Ready</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let lastMode = null;
+        let currentNodes = [];
+        let draggingNodeIndex = null;
+        let canvas = null;
+        let ctx = null;
+        const scale = window.devicePixelRatio || 1;
+
+        function initCanvas() {
+            canvas = document.getElementById('nodeCanvas');
+            ctx = canvas.getContext('2d');
+            const video = document.getElementById('videoFeed');
+
+            function resizeCanvas() {
+                const rect = video.getBoundingClientRect();
+                // Set CSS size
+                canvas.style.width = rect.width + 'px';
+                canvas.style.height = rect.height + 'px';
+                // Set internal resolution with high-DPI support
+                canvas.width = rect.width * scale;
+                canvas.height = rect.height * scale;
+                ctx.scale(scale, scale);
+            }
+
+            // Resize immediately and on updates
+            resizeCanvas();
+            video.addEventListener('load', resizeCanvas);
+            window.addEventListener('resize', resizeCanvas);
+            // Also check periodically in case dimensions change
+            setInterval(resizeCanvas, 500);
+
+            // Attach event listeners immediately (canvas exists and has dimensions)
+            canvas.addEventListener('mousedown', handleCanvasMouseDown);
+            canvas.addEventListener('mousemove', handleCanvasMouseMove);
+            canvas.addEventListener('mouseup', handleCanvasMouseUp);
+            canvas.addEventListener('mouseleave', handleCanvasMouseUp);
+        }
+
+        function drawNodes() {
+            if (!canvas || !ctx) return;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (currentNodes.length === 0) return;
+
+            // Draw single node as large circle
+            const node = currentNodes[0];
+            const x = node[0] * canvas.width;
+            const y = node[1] * canvas.height;
+            const radius = 20;
+
+            // Highlight if dragging
+            if (draggingNodeIndex === 0) {
+                ctx.fillStyle = '#ff6600';
+                ctx.strokeStyle = '#ffff00';
+            } else {
+                ctx.fillStyle = '#00ffff';
+                ctx.strokeStyle = '#ffff00';
+            }
+
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        function getNodeAtPosition(x, y) {
+            const hitRadius = 30;  // Increased from 20px for easier clicking
+            for (let i = 0; i < currentNodes.length; i++) {
+                const nodeX = currentNodes[i][0] * canvas.width;
+                const nodeY = currentNodes[i][1] * canvas.height;
+                const dist = Math.hypot(x - nodeX, y - nodeY);
+                if (dist < hitRadius) {
+                    return i;
+                }
+            }
+            return null;
+        }
+
+        function handleCanvasMouseDown(e) {
+            if (!canvas) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            draggingNodeIndex = getNodeAtPosition(x, y);
+            if (draggingNodeIndex !== null) {
+                canvas.style.cursor = 'grabbing';
+            }
+        }
+
+        function handleCanvasMouseMove(e) {
+            if (!canvas) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (draggingNodeIndex !== null) {
+                // Update node position (normalized to 0-1)
+                const normX = Math.max(0, Math.min(1, x / rect.width));
+                const normY = Math.max(0, Math.min(1, y / rect.height));
+                const z = currentNodes[draggingNodeIndex][2];
+                currentNodes[draggingNodeIndex] = [normX, normY, z];
+                drawNodes();
+            } else {
+                // Show grab cursor when hovering over nodes
+                const nodeIndex = getNodeAtPosition(x, y);
+                canvas.style.cursor = nodeIndex !== null ? 'grab' : 'default';
+            }
+        }
+
+        function handleCanvasMouseUp(e) {
+            if (draggingNodeIndex !== null) {
+                // Send update to backend
+                fetch('/update_node', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        index: draggingNodeIndex,
+                        x: currentNodes[draggingNodeIndex][0],
+                        y: currentNodes[draggingNodeIndex][1]
+                    })
+                }).catch(error => console.error('Error updating node:', error));
+
+                draggingNodeIndex = null;
+                canvas.style.cursor = 'grab';
+            }
+        }
+
+        function updateNodeState() {
+            fetch('/node_state')
+                .then(response => response.json())
+                .then(data => {
+                    // Update current nodes
+                    currentNodes = data.nodes;
+                    drawNodes();
+
+                    // Update mode indicator
+                    let modeText = 'Mode: Ready to Place';
+                    if (data.gesture_blocked) {
+                        modeText = 'Mode: Drag Mode';
+                    }
+
+                    const modeIndicator = document.getElementById('modeIndicator');
+                    if (modeText !== lastMode) {
+                        modeIndicator.textContent = modeText;
+                        lastMode = modeText;
+                    }
+
+                    // Show/hide instructions (always show, but update text based on mode)
+                    const instructions = document.getElementById('instructions');
+                    const instructionsTitle = document.getElementById('instructionsTitle');
+                    const instructionsText = document.getElementById('instructionsText');
+
+                    if (data.gesture_blocked) {
+                        instructionsTitle.textContent = 'Drag Mode';
+                        instructionsText.innerHTML = 'Click and drag the node to move it.<br>Tap Reset to place a new node.';
+                    } else {
+                        instructionsTitle.textContent = 'Placement Mode';
+                        instructionsText.innerHTML = 'Close your fist to place a node.<br>Click and drag to move it around.<br>Tap Reset to place a new node.';
+                    }
+                    instructions.classList.add('visible');
+
+                    // Update node status
+                    const nodeCount = document.getElementById('nodeCount');
+                    nodeCount.textContent = data.in_node_mode ? 'Placed' : 'Not Placed';
+
+                    // Update mode status in stats
+                    const modeStatus = document.getElementById('modeStatus');
+                    modeStatus.textContent = data.gesture_blocked ? 'Drag' : 'Ready';
+                })
+                .catch(error => console.error('Error:', error));
+        }
+
+        function resetNodes() {
+            fetch('/reset', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    updateNodeState();
+                })
+                .catch(error => console.error('Error:', error));
+        }
+
+        // Initialize canvas (event handlers attached after delay to ensure readiness)
+        initCanvas();
+
+        // Update node state every 100ms
+        setInterval(updateNodeState, 100);
+        updateNodeState();
+    </script>
+</body>
+</html>
