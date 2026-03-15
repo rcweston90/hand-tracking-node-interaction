@@ -37,6 +37,19 @@ HAND_CONNECTIONS = [
 # Store latest hand data
 current_hand_data = {}
 
+# Hand detection state
+class HandDetectionState:
+    def __init__(self):
+        self.hand_detected = False
+        self.fist_ready = False
+        self.fist_confidence = 0.0
+        self.hand_x = 0.0  # Normalized 0-1
+        self.hand_y = 0.0  # Normalized 0-1
+        self.hand_z = 0.0
+        self.timestamp = 0
+
+hand_state = HandDetectionState()
+
 # Node placement state
 class NodePlacementState:
     def __init__(self):
@@ -80,7 +93,7 @@ def get_distance(p1, p2):
     return ((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)**0.5
 
 def detect_fist(hand_landmarks):
-    """Detect if hand is closed in a fist"""
+    """Detect if hand is closed in a fist with confidence score"""
     THUMB_TIP = 4
     INDEX_TIP = 8
     MIDDLE_TIP = 12
@@ -103,8 +116,13 @@ def detect_fist(hand_landmarks):
     # Simple fist detection: all fingers close to palm
     is_fist = all(d < fist_threshold for d in distances_to_palm)
 
-    # Simplified confidence (avoid numpy operations)
-    confidence = 0.8 if is_fist else 0.0
+    # Calculate confidence based on how close fingers are to palm
+    # Closer fingers = higher confidence
+    if is_fist:
+        max_distance = max(distances_to_palm)
+        confidence = max(0.5, 1.0 - (max_distance / fist_threshold))
+    else:
+        confidence = 0.0
 
     return is_fist, (palm.x, palm.y), palm.z, confidence
 
@@ -170,7 +188,7 @@ def draw_hand_landmarks(frame, landmarks):
         cv2.line(frame, start_pos, end_pos, (255, 0, 0), 2)
 
 def gen_frames():
-    global current_hand_data, node_state
+    global current_hand_data, node_state, hand_state
     cam = get_camera()
     while True:
         success, frame = cam.read()
@@ -192,11 +210,24 @@ def gen_frames():
         # Hand detection and node placement
         current_time = time.time()
         hand_data = []
+        hand_state.hand_detected = False
+        hand_state.fist_ready = False
+        hand_state.fist_confidence = 0.0
 
         if results.hand_landmarks:
+            hand_state.hand_detected = True
             for hand_idx, hand_landmarks in enumerate(results.hand_landmarks):
                 # Detect fist
                 is_fist, palm_pos, hand_z, confidence = detect_fist(hand_landmarks)
+
+                if is_fist:
+                    hand_state.fist_ready = True
+                    hand_state.fist_confidence = confidence
+
+                # Track hand position for dragging
+                hand_state.hand_x = palm_pos[0]
+                hand_state.hand_y = palm_pos[1]
+                hand_state.hand_z = hand_z
 
                 # Only process fist input if gesture is not blocked
                 if not node_state.gesture_blocked and is_fist:
@@ -237,14 +268,21 @@ def hand_data():
 
 @app.route('/node_state')
 def get_node_state():
-    """Get current node placement state"""
+    """Get current node placement state with hand detection data"""
+    global hand_state
     # Convert single node to list format for compatibility with frontend
     nodes = [node_state.node] if node_state.node is not None else []
     return jsonify({
         'nodes': nodes,
         'node_count': 1 if node_state.node is not None else 0,
         'gesture_blocked': node_state.gesture_blocked,
-        'in_node_mode': node_state.is_in_node_mode()
+        'in_node_mode': node_state.is_in_node_mode(),
+        'hand_detected': hand_state.hand_detected,
+        'fist_ready': hand_state.fist_ready,
+        'confidence': hand_state.fist_confidence,
+        'hand_x': hand_state.hand_x,
+        'hand_y': hand_state.hand_y,
+        'hand_z': hand_state.hand_z
     })
 
 @app.route('/reset', methods=['POST'])

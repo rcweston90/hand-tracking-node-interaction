@@ -99,6 +99,88 @@
         canvas:active {
             cursor: grabbing;
         }
+        /* Coordinate Display */
+        .coordinate-display {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            border: 1px solid rgba(128, 128, 128, 0.5);
+            padding: 10px 12px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 11px;
+            color: #888;
+            line-height: 1.4;
+            z-index: 10;
+            pointer-events: none;
+        }
+        .coordinate-display.active {
+            color: #00ff00;
+            border-color: #00ff00;
+        }
+        /* Gesture Status Badge */
+        .gesture-status {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            border: 2px solid #888;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #888;
+            font-weight: 500;
+            z-index: 10;
+            min-width: 140px;
+            text-align: center;
+            pointer-events: none;
+        }
+        .gesture-status.hand-detected {
+            border-color: #00ff00;
+            color: #00ff00;
+        }
+        .gesture-status.fist-ready {
+            border-color: #00ffff;
+            color: #00ffff;
+        }
+        .gesture-status.no-hand {
+            border-color: #ff4444;
+            color: #ff4444;
+        }
+        .confidence-meter {
+            position: absolute;
+            top: 50px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            border: 1px solid rgba(128, 128, 128, 0.5);
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 11px;
+            color: #888;
+            z-index: 10;
+            display: none;
+            pointer-events: none;
+        }
+        .confidence-meter.visible {
+            display: block;
+        }
+        /* Guide Toggle Hint */
+        .guide-hint {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            font-size: 10px;
+            color: #666;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 4px 8px;
+            border-radius: 3px;
+            z-index: 5;
+            pointer-events: none;
+        }
+        .guide-hint.active {
+            color: #00ff00;
+        }
         .stats {
             display: flex;
             justify-content: center;
@@ -124,6 +206,18 @@
             font-size: 20px;
             font-weight: 600;
         }
+        /* Pulse animation for node placement */
+        @keyframes pulse-glow {
+            0% {
+                box-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
+            }
+            50% {
+                box-shadow: 0 0 30px rgba(0, 255, 255, 0.4);
+            }
+            100% {
+                box-shadow: 0 0 10px rgba(0, 255, 255, 0);
+            }
+        }
     </style>
 </head>
 <body>
@@ -146,6 +240,14 @@
         <div class="video-container" id="videoContainer">
             <img src="{{ url_for('video_feed') }}" alt="Camera Stream" id="videoFeed">
             <canvas id="nodeCanvas" style="position: absolute; top: 0; left: 0; cursor: grab;"></canvas>
+            <div class="gesture-status" id="gestureStatus">🔴 No Hand</div>
+            <div class="confidence-meter" id="confidenceMeter"></div>
+            <div class="coordinate-display" id="coordinateDisplay">
+                <div>X: ---</div>
+                <div>Y: ---</div>
+                <div>Z: ---</div>
+            </div>
+            <div class="guide-hint" id="guideHint">Press G to show guides</div>
         </div>
 
         <div class="stats">
@@ -161,12 +263,27 @@
     </div>
 
     <script>
+        // State variables
         let lastMode = null;
         let currentNodes = [];
         let draggingNodeIndex = null;
+        let lastMouseX = null;
+        let lastMouseY = null;
+        let dragStartX = null;
+        let dragStartY = null;
         let canvas = null;
         let ctx = null;
         const scale = window.devicePixelRatio || 1;
+
+        // Guide visibility and gesture state
+        let showGuides = localStorage.getItem('showGuides') === 'true';
+        let gestureState = { hand_detected: false, fist_ready: false, confidence: 0 };
+        let lastNodePlacementTime = null;
+        let pulseAnimation = null;
+
+        // Hand-based dragging state
+        let handGrabbing = false;  // True when fist closed over node
+        let lastFistState = false; // Track fist state changes
 
         function initCanvas() {
             canvas = document.getElementById('nodeCanvas');
@@ -175,33 +292,101 @@
 
             function resizeCanvas() {
                 const rect = video.getBoundingClientRect();
-                // Set CSS size
                 canvas.style.width = rect.width + 'px';
                 canvas.style.height = rect.height + 'px';
-                // Set internal resolution with high-DPI support
                 canvas.width = rect.width * scale;
                 canvas.height = rect.height * scale;
                 ctx.scale(scale, scale);
             }
 
-            // Resize immediately and on updates
             resizeCanvas();
             video.addEventListener('load', resizeCanvas);
             window.addEventListener('resize', resizeCanvas);
-            // Also check periodically in case dimensions change
             setInterval(resizeCanvas, 500);
 
-            // Attach event listeners immediately (canvas exists and has dimensions)
             canvas.addEventListener('mousedown', handleCanvasMouseDown);
             canvas.addEventListener('mousemove', handleCanvasMouseMove);
             canvas.addEventListener('mouseup', handleCanvasMouseUp);
             canvas.addEventListener('mouseleave', handleCanvasMouseUp);
         }
 
+        function drawGuides() {
+            if (!showGuides || !canvas || !ctx) return;
+
+            const w = canvas.width;
+            const h = canvas.height;
+
+            // 10x10 grid
+            ctx.strokeStyle = 'rgba(128, 128, 128, 0.1)';
+            ctx.lineWidth = 1;
+            for (let i = 1; i < 10; i++) {
+                const x = (i / 10) * w;
+                const y = (i / 10) * h;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, h);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(w, y);
+                ctx.stroke();
+            }
+
+            // Center crosshair
+            ctx.strokeStyle = 'rgba(0, 255, 255, 0.2)';
+            ctx.lineWidth = 1;
+            const centerX = w / 2;
+            const centerY = h / 2;
+            ctx.beginPath();
+            ctx.moveTo(centerX - 30, centerY);
+            ctx.lineTo(centerX + 30, centerY);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(centerX, centerY - 30);
+            ctx.lineTo(centerX, centerY + 30);
+            ctx.stroke();
+
+            // Boundary box (10px inset)
+            ctx.strokeStyle = 'rgba(0, 255, 255, 0.15)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.strokeRect(10, 10, w - 20, h - 20);
+            ctx.setLineDash([]);
+        }
+
+        function drawDragFeedback() {
+            if (draggingNodeIndex === null || !lastMouseX || !lastMouseY) return;
+            if (currentNodes.length === 0) return;
+
+            const node = currentNodes[draggingNodeIndex];
+            const startX = dragStartX || node[0] * canvas.width;
+            const startY = dragStartY || node[1] * canvas.height;
+
+            // Drag trail (semi-transparent line)
+            ctx.strokeStyle = 'rgba(255, 100, 0, 0.3)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(startX, startY);
+            ctx.lineTo(lastMouseX, lastMouseY);
+            ctx.stroke();
+
+            // Ghost node at cursor
+            ctx.fillStyle = 'rgba(0, 255, 255, 0.2)';
+            ctx.strokeStyle = 'rgba(0, 255, 255, 0.4)';
+            ctx.beginPath();
+            ctx.arc(lastMouseX, lastMouseY, 20, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+
         function drawNodes() {
             if (!canvas || !ctx) return;
 
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw guides
+            drawGuides();
 
             if (currentNodes.length === 0) return;
 
@@ -225,10 +410,49 @@
             ctx.fill();
             ctx.lineWidth = 2;
             ctx.stroke();
+
+            // Draw drag feedback
+            if (draggingNodeIndex === 0) {
+                drawDragFeedback();
+            }
+
+            // Update coordinate display
+            updateCoordinateDisplay(node);
+        }
+
+        function updateCoordinateDisplay(node) {
+            if (!node) return;
+            const display = document.getElementById('coordinateDisplay');
+            const x = (node[0] * 100).toFixed(1);
+            const y = (node[1] * 100).toFixed(1);
+            const z = (node[2] * 100).toFixed(1);
+
+            display.innerHTML = `<div>X: ${x}%</div><div>Y: ${y}%</div><div>Z: ${z}%</div>`;
+            display.classList.add('active');
+        }
+
+        function updateGestureStatus(data) {
+            const statusEl = document.getElementById('gestureStatus');
+            const confidenceEl = document.getElementById('confidenceMeter');
+
+            if (!data.hand_detected) {
+                statusEl.textContent = '🔴 No Hand';
+                statusEl.className = 'gesture-status no-hand';
+                confidenceEl.classList.remove('visible');
+            } else if (data.fist_ready) {
+                statusEl.textContent = '🔵 Fist Ready';
+                statusEl.className = 'gesture-status fist-ready';
+                confidenceEl.textContent = `Confidence: ${(data.confidence * 100).toFixed(0)}%`;
+                confidenceEl.classList.add('visible');
+            } else {
+                statusEl.textContent = '🟢 Hand Detected';
+                statusEl.className = 'gesture-status hand-detected';
+                confidenceEl.classList.remove('visible');
+            }
         }
 
         function getNodeAtPosition(x, y) {
-            const hitRadius = 30;  // Increased from 20px for easier clicking
+            const hitRadius = 30;
             for (let i = 0; i < currentNodes.length; i++) {
                 const nodeX = currentNodes[i][0] * canvas.width;
                 const nodeY = currentNodes[i][1] * canvas.height;
@@ -248,6 +472,8 @@
             draggingNodeIndex = getNodeAtPosition(x, y);
             if (draggingNodeIndex !== null) {
                 canvas.style.cursor = 'grabbing';
+                dragStartX = x;
+                dragStartY = y;
             }
         }
 
@@ -256,16 +482,16 @@
             const rect = canvas.getBoundingClientRect();
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
+            lastMouseX = x;
+            lastMouseY = y;
 
             if (draggingNodeIndex !== null) {
-                // Update node position (normalized to 0-1)
                 const normX = Math.max(0, Math.min(1, x / rect.width));
                 const normY = Math.max(0, Math.min(1, y / rect.height));
                 const z = currentNodes[draggingNodeIndex][2];
                 currentNodes[draggingNodeIndex] = [normX, normY, z];
                 drawNodes();
             } else {
-                // Show grab cursor when hovering over nodes
                 const nodeIndex = getNodeAtPosition(x, y);
                 canvas.style.cursor = nodeIndex !== null ? 'grab' : 'default';
             }
@@ -273,7 +499,6 @@
 
         function handleCanvasMouseUp(e) {
             if (draggingNodeIndex !== null) {
-                // Send update to backend
                 fetch('/update_node', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -285,17 +510,70 @@
                 }).catch(error => console.error('Error updating node:', error));
 
                 draggingNodeIndex = null;
+                dragStartX = null;
+                dragStartY = null;
                 canvas.style.cursor = 'grab';
             }
+        }
+
+        function handleGKeyToggle() {
+            showGuides = !showGuides;
+            localStorage.setItem('showGuides', showGuides);
+            const hint = document.getElementById('guideHint');
+            hint.classList.toggle('active', showGuides);
+            hint.textContent = showGuides ? 'Guides ON (G)' : 'Press G for guides';
         }
 
         function updateNodeState() {
             fetch('/node_state')
                 .then(response => response.json())
                 .then(data => {
-                    // Update current nodes
                     currentNodes = data.nodes;
+
+                    // Hand-based dragging in drag mode
+                    if (data.gesture_blocked && data.hand_detected && currentNodes.length > 0) {
+                        // Detect fist state change
+                        const fistJustClosed = data.fist_ready && !lastFistState;
+                        const fistJustOpened = !data.fist_ready && lastFistState;
+
+                        // Fist closes: start grabbing (if not already grabbing)
+                        if (fistJustClosed && !handGrabbing) {
+                            handGrabbing = true;
+                        }
+
+                        // Hand open while grabbing: drag node with hand
+                        if (handGrabbing && !data.fist_ready) {
+                            const node = currentNodes[0];
+                            currentNodes[0] = [data.hand_x, data.hand_y, node[2]];
+                        }
+
+                        // Fist closes again while grabbing: drop node
+                        if (handGrabbing && data.fist_ready && lastFistState) {
+                            handGrabbing = false;
+                            // Send final position to backend
+                            if (currentNodes.length > 0) {
+                                fetch('/update_node', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        index: 0,
+                                        x: currentNodes[0][0],
+                                        y: currentNodes[0][1]
+                                    })
+                                }).catch(error => console.error('Error updating node:', error));
+                            }
+                        }
+
+                        lastFistState = data.fist_ready;
+                    } else {
+                        handGrabbing = false;
+                        lastFistState = false;
+                    }
+
                     drawNodes();
+
+                    // Update gesture status
+                    updateGestureStatus(data);
 
                     // Update mode indicator
                     let modeText = 'Mode: Ready to Place';
@@ -309,7 +587,7 @@
                         lastMode = modeText;
                     }
 
-                    // Show/hide instructions (always show, but update text based on mode)
+                    // Update instructions
                     const instructions = document.getElementById('instructions');
                     const instructionsTitle = document.getElementById('instructionsTitle');
                     const instructionsText = document.getElementById('instructionsText');
@@ -343,10 +621,24 @@
                 .catch(error => console.error('Error:', error));
         }
 
-        // Initialize canvas (event handlers attached after delay to ensure readiness)
+        // Keyboard handler
+        document.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'g') {
+                handleGKeyToggle();
+            }
+        });
+
+        // Initialize
         initCanvas();
 
-        // Update node state every 100ms
+        // Restore guide visibility hint
+        const hint = document.getElementById('guideHint');
+        if (showGuides) {
+            hint.classList.add('active');
+            hint.textContent = 'Guides ON (G)';
+        }
+
+        // Update state periodically
         setInterval(updateNodeState, 100);
         updateNodeState();
     </script>
